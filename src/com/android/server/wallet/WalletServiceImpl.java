@@ -1,17 +1,17 @@
 package com.android.server.wallet;
 
-import android.app.IOnETHBlanceGetListener;
-import android.app.IWalletManager;
-import android.app.WalletManager;
-import android.app.WalletManager.OnETHBlanceGetListener;
-import android.content.pm.WalletData;
+import brahmaos.app.IOnETHBlanceGetListener;
+import brahmaos.app.IWalletManager;
+import brahmaos.app.WalletManager;
+import brahmaos.app.WalletManager.OnETHBlanceGetListener;
+import brahmaos.content.WalletData;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.PersistableBundle;
 import android.os.RemoteException;
 import android.util.AtomicFile;
-import android.util.BrahmaConstants;
-import android.util.DataCryptoUtils;
+import brahmaos.content.BrahmaConstants;
+import brahmaos.util.DataCryptoUtils;
 import android.util.Log;
 import android.util.Xml;
 
@@ -23,10 +23,13 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -40,24 +43,47 @@ import org.bitcoinj.wallet.DeterministicKeyChain;
 import org.bitcoinj.wallet.DeterministicSeed;
 import org.bitcoinj.wallet.UnreadableWalletException;
 import org.spongycastle.util.encoders.Hex;
-import org.xmlpull.v1.XmlPullParser;
-import org.xmlpull.v1.XmlPullParserException;
-import libcore.io.IoUtils;
+
 import org.web3j.crypto.CipherException;
 import org.web3j.crypto.Credentials;
 import org.web3j.crypto.ECKeyPair;
 import org.web3j.crypto.Wallet;
 import org.web3j.crypto.WalletFile;
 import org.web3j.crypto.WalletUtils;
+
 import org.web3j.utils.Numeric;
+import org.web3j.utils.Convert;
+
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.Web3jFactory;
 import org.web3j.protocol.ObjectMapperFactory;
 import org.web3j.protocol.http.HttpService;
-import org.web3j.protocol.core.Request;
-import org.web3j.protocol.core.methods.response.EthCall;
-import org.web3j.protocol.core.methods.response.EthGetBalance;
 import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.Request;
+import org.web3j.protocol.core.methods.request.Transaction;
+import org.web3j.protocol.core.methods.response.EthCall;
+import org.web3j.protocol.core.methods.response.EthGasPrice;
+import org.web3j.protocol.core.methods.response.EthGetBalance;
+import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
+import org.web3j.protocol.core.methods.response.EthSendTransaction;
+import org.web3j.protocol.core.methods.response.TransactionReceipt;
+import org.web3j.protocol.core.methods.response.EthTransaction;
+
+import org.web3j.tx.RawTransactionManager;
+import org.web3j.tx.TransactionManager;
+
+import org.web3j.abi.FunctionEncoder;
+import org.web3j.abi.FunctionReturnDecoder;
+import org.web3j.abi.TypeReference;
+import org.web3j.abi.datatypes.Address;
+import org.web3j.abi.datatypes.Function;
+import org.web3j.abi.datatypes.Type;
+import org.web3j.abi.datatypes.Utf8String;
+import org.web3j.abi.datatypes.generated.Uint256;
+
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
+import libcore.io.IoUtils;
 import org.xmlpull.v1.XmlSerializer;
 
 import com.android.internal.util.FastXmlSerializer;
@@ -70,6 +96,9 @@ import rx.Observer;
 import rx.Subscriber;
 import rx.android.schedulers.AndroidSchedulers;
 import rx.schedulers.Schedulers;
+
+import okhttp3.OkHttpClient;
+import okhttp3.logging.HttpLoggingInterceptor;
 
 public class WalletServiceImpl {
     private static final String TAG = "WalletServiceImpl";
@@ -104,9 +133,6 @@ public class WalletServiceImpl {
     private HashMap<String, WalletData> mWalletsMap = new HashMap<>();//<address, WalletData>
     private String[] mWalletAddresses;
 
-    public static final String MAINNET_URL = "https://mainnet.infura.io/Gy3Csyt4bzKIGsctm3g0";
-    private String mNetworkUrl;
-
     public WalletServiceImpl(WalletSystem.SyncRoot lock) {
         mLock = lock;
         synchronized (mLock) {
@@ -126,8 +152,6 @@ public class WalletServiceImpl {
             }
             readWalletListL();
         }
-        mNetworkUrl = MAINNET_URL;
-        mDcUtils = new DataCryptoUtils();
     }
 
     private final IWalletManager.Stub mBinderImpl = new IWalletManager.Stub() {
@@ -323,11 +347,6 @@ public class WalletServiceImpl {
         }
 
         @Override
-        public void getEthereumAccountBalanceByAddress(String addr, IOnETHBlanceGetListener listener) {
-            getEthBalance(addr, listener);
-        }
-
-        @Override
         public List<WalletData> getAllWallets() {
             int allSize = mWalletsMap.size();
             if (allSize <= 0) {
@@ -368,19 +387,256 @@ public class WalletServiceImpl {
             return mWalletsMap.get(address);
         }
 
-        @Override
-        public void setEthereumNetworkUrl(String networkUrl) {
-            mNetworkUrl = networkUrl;
+        public boolean isValidAddress(String address, String chainType) {
+            if (WalletManager.WALLET_CHAIN_TYPE_ETH.equalsIgnoreCase(chainType)) {
+                return address != null && address.length() >= 2 &&
+                        address.charAt(0) == '0' && address.charAt(1) == 'x' &&
+                        WalletUtils.isValidAddress(address);
+            } else {
+                return true;
+            }
         }
 
         @Override
-        public String decryptMnemonics(String mnemonicHexStr, String password) {
-            return mDcUtils.aes128Decrypt(mnemonicHexStr, password);
+        public void getEthereumAccountBalanceByAddress(String networkUrl, String addr,
+                                                       IOnETHBlanceGetListener listener) {
+            if (DEBUG) {
+                Log.d(TAG, "getEthereumAccountBalanceByAddress----" + networkUrl);
+            }
+            Web3j web3 = Web3jFactory.build(new HttpService(networkUrl));
+            web3.ethGetBalance(addr, DefaultBlockParameterName.LATEST)
+                    .observable()
+                    .subscribeOn(Schedulers.io())
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .subscribe(new Observer<EthGetBalance>() {
+                        @Override
+                        public void onCompleted() {
+                        }
+
+                        @Override
+                        public void onError(Throwable e) {
+                            if (DEBUG) {
+                                Log.d(TAG, "ETH blance--" + e.toString());
+                            }
+                            try {
+                                listener.onETHBlanceGetError();
+                            } catch (RemoteException re) {
+                                Log.e(TAG, "Error in onError: " + re.toString());
+                            }
+                        }
+
+                        @Override
+                        public void onNext(EthGetBalance ethBalance) {
+                            try {
+                                if (DEBUG) {
+                                    Log.d(TAG, "ETH " + addr + ": " + ethBalance.getBalance());
+                                }
+                                if (ethBalance != null && ethBalance.getBalance() != null) {
+                                    listener.onETHBlanceGetSuccess(ethBalance.getBalance().toString());
+                                } else {
+                                    listener.onETHBlanceGetSuccess("0");
+                                }
+                            } catch (RemoteException re) {
+                                Log.e(TAG, "Error in onNext: " + re.toString());
+                            }
+                        }
+                    });
         }
 
         @Override
-        public String decryptPrivateKey(String privateKeyHexStr, String password) {
-            return mDcUtils.aes128Decrypt(privateKeyHexStr, password);
+        public void getEthereumTokenBalanceByAddress(String networkUrl, String addr,
+                                                     String tokenAddr,
+                                                     IOnETHBlanceGetListener listener) {
+            if (DEBUG) {
+                Log.d(TAG, "getEthereumTokenBalanceByAddress----" + networkUrl);
+            }
+            Web3j web3 = Web3jFactory.build(new HttpService(networkUrl));
+            Function function = new Function(
+                    "balanceOf",
+                    Arrays.asList(new Address(addr)),  // Solidity Types in smart contract functions
+                    Arrays.asList(new TypeReference<Uint256>() {
+                    }));
+
+            String encodedFunction = FunctionEncoder.encode(function);
+            Transaction trans = Transaction.createEthCallTransaction(addr, tokenAddr, encodedFunction);
+
+            try {
+                EthCall ethCall = web3.ethCall(
+                        trans,
+                        DefaultBlockParameterName.LATEST).send();
+                try {
+                    if (ethCall != null && ethCall.getValue() != null) {
+                        if (DEBUG) {
+                            Log.d(TAG, tokenAddr + ": " + ethCall.getValue());
+                        }
+                        try {
+                            listener.onETHBlanceGetSuccess(Numeric.decodeQuantity(ethCall.getValue()).toString());
+                        } catch (Exception e) {
+                            listener.onETHBlanceGetSuccess("0");
+                        }
+                    } else {
+                        try {
+                            listener.onETHBlanceGetError();
+                        } catch (RemoteException re) {
+                            Log.e(TAG, "Error in onError: " + re.toString());
+                        }
+                    }
+                } catch (RemoteException re) {
+                    Log.e(TAG, "Error in onNext: " + re.toString());
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error in ethCall: " + e.toString());
+                try {
+                    listener.onETHBlanceGetError();
+                } catch (RemoteException re) {
+                    Log.e(TAG, "Error in onError: " + re.toString());
+                }
+            }
+
+            /*Request<?, EthCall> ethCall = web3.ethCall(
+                    trans,
+                    DefaultBlockParameterName.LATEST);
+            ethCall.observable()
+                    .subscribeOn(Schedulers.io())
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .subscribe(new Observer<EthCall>() {
+                        @Override
+                        public void onCompleted() {
+                        }
+
+                        @Override
+                        public void onError(Throwable e) {
+                            if (DEBUG) {
+                                Log.d(TAG, tokenAddr + " token blance--" + e.toString());
+                            }
+                            try {
+                                listener.onETHBlanceGetError();
+                            } catch (RemoteException re) {
+                                Log.e(TAG, "Error in onError: " + re.toString());
+                            }
+
+                        }
+
+                        @Override
+                        public void onNext(EthCall ethCall) {
+                            try {
+                                if (ethCall != null && ethCall.getValue() != null) {
+                                    if (DEBUG) {
+                                        Log.d(TAG, tokenAddr + ": " + ethCall.getValue());
+                                    }
+                                    listener.onETHBlanceGetSuccess(Numeric.decodeQuantity(ethCall.getValue()).toString());
+                                } else {
+                                    listener.onETHBlanceGetSuccess("0");
+                                }
+                            } catch (RemoteException re) {
+                                Log.e(TAG, "Error in onNext: " + re.toString());
+                            }
+                        }
+                    });*/
+        }
+
+        @Override
+        public String transferEthereum(String networkUrl, String accountAddress, String tokenAddress, String password,
+                                   String destinationAddress, double amount,
+                                   double gasPrice, long gasLimit, String remark) {
+            if (DEBUG) {
+                Log.d(TAG, "transferEthereum----" + networkUrl);
+            }
+            Web3j web3 = Web3jFactory.build(new HttpService(networkUrl));
+            Credentials credentials = null;
+            //check account address and password
+            WalletData walletData = mWalletsMap.get(accountAddress);
+            if (null == walletData) {
+                Log.d(TAG, "Error: account address does not exist!");
+                return null;
+            }
+            if (!isValidAddress(destinationAddress, WalletManager.WALLET_CHAIN_TYPE_ETH)) {
+                Log.d(TAG, "Error: receiver's address is not valid, please check!");
+                return null;
+            }
+            try {
+                ObjectMapper objectMapper = ObjectMapperFactory.getObjectMapper();
+                WalletFile walletFile = objectMapper.readValue(walletData.keyStore, WalletFile.class);
+                credentials = Credentials.create(Wallet.decrypt(password, walletFile));
+                if (DEBUG) {
+                    Log.d(TAG, "load credential success");
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "Error: password is wrong!");
+                return null;
+            }
+
+            try {
+                BigDecimal gasPriceWei = Convert.toWei(BigDecimal.valueOf(gasPrice), Convert.Unit.GWEI);
+                RawTransactionManager txManager = new RawTransactionManager(web3, credentials);
+                if (null == tokenAddress || tokenAddress.isEmpty()) {//means ethereum
+                    EthSendTransaction transactionResponse =
+                            txManager.sendTransaction(
+                                    gasPriceWei.toBigIntegerExact(),
+                                    BigInteger.valueOf(gasLimit),
+                                    destinationAddress,
+                                    Numeric.toHexString(remark.getBytes()),
+                                    Convert.toWei(BigDecimal.valueOf(amount), Convert.Unit.ETHER).toBigInteger());
+                    if (transactionResponse.hasError()) {
+                        Log.e(TAG, "Error processing transaction request: "
+                                + transactionResponse.getError().getMessage());
+                        return null;
+                    }
+
+                    if (DEBUG) {
+                        Log.d(TAG, "remark: " + remark + "; hex remark:"
+                                + Numeric.toHexString(remark.getBytes()));
+                    }
+
+                    String transactionHash = transactionResponse.getTransactionHash();
+                    return transactionHash;
+                } else {//means token
+                    Function function = new Function(
+                            "transfer",
+                            Arrays.<Type>asList(new Address(destinationAddress),
+                                    new Uint256(BigDecimal.valueOf(amount).multiply(new BigDecimal(Math.pow(10, 18))).toBigInteger())),
+                            Collections.<TypeReference<?>>emptyList());
+
+                    EthSendTransaction transactionResponse =
+                            txManager.sendTransaction(
+                                    gasPriceWei.toBigIntegerExact(),
+                                    BigInteger.valueOf(gasLimit),
+                                    tokenAddress,
+                                    FunctionEncoder.encode(function),
+                                    BigInteger.ZERO);
+
+                    if (transactionResponse.hasError()) {
+                        Log.e(TAG, "Error processing transaction request: "
+                                + transactionResponse.getError().getMessage());
+                        return null;
+                    }
+                    return transactionResponse.getTransactionHash();
+                }
+            } catch (IOException | NumberFormatException e) {
+                Log.e(TAG, "" + e.toString());
+            }
+            return null;
+        }
+
+        @Override
+        public String getEthereumTransactionByHash(String networkUrl, String transactionHash) {
+            if (DEBUG) {
+                Log.d(TAG, "getEthereumTransactionByHash----" + networkUrl);
+            }
+            String result = null;
+            try {
+                Web3j web3 = Web3jFactory.build(new HttpService(networkUrl));
+                Request<?, EthTransaction> etr = web3.ethGetTransactionByHash(transactionHash);
+                EthTransaction etx = etr.send();
+                ObjectMapper objectMapper = ObjectMapperFactory.getObjectMapper();
+                org.web3j.protocol.core.methods.response.Transaction trans = etx
+                        .getTransaction();
+                result = objectMapper.writeValueAsString(trans);
+                return result;
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to get transactionHash: " + e.toString());
+            }
+            return result;
         }
     };
 
@@ -536,41 +792,6 @@ public class WalletServiceImpl {
             Log.d(TAG, "" + e.toString());
         }
         return null;
-    }
-
-    private void getEthBalance(String address, IOnETHBlanceGetListener listener) {
-        Web3j web3 = Web3jFactory.build(new HttpService(mNetworkUrl));
-        web3.ethGetBalance(address, DefaultBlockParameterName.LATEST)
-                .observable()
-                .subscribeOn(Schedulers.io())
-                .observeOn(AndroidSchedulers.mainThread())
-                .subscribe(new Observer<EthGetBalance>() {
-                    @Override
-                    public void onCompleted() {
-                    }
-
-                    @Override
-                    public void onError(Throwable e) {
-                        try {
-                            listener.onETHBlanceGetError();
-                        } catch (RemoteException re) {
-                            Log.e(TAG, "Error in onError: " + re.toString());
-                        }
-                    }
-
-                    @Override
-                    public void onNext(EthGetBalance ethBalance) {
-                        try {
-                            if (ethBalance != null && ethBalance.getBalance() != null) {
-                                listener.onETHBlanceGetSuccess(ethBalance.getBalance().toString());
-                            } else {
-                                listener.onETHBlanceGetError();
-                            }
-                        } catch (RemoteException re) {
-                            Log.e(TAG, "Error in onNext: " + re.toString());
-                        }
-                    }
-                });
     }
 
     private boolean isValidKeystore(WalletFile walletFile, String password)

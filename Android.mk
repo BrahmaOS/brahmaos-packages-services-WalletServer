@@ -28,6 +28,7 @@ LOCAL_STATIC_JAVA_LIBRARIES := \
     reactivex-rxjava \
     reactivex-rxandroid \
     okhttp-3 \
+    okhttp-logging \
     okio \
 
 LOCAL_CERTIFICATE := platform
