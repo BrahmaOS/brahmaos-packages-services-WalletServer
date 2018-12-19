@@ -1,5 +1,6 @@
 package com.android.server.wallet;
 
+import android.content.Context;
 import android.util.Log;
 
 public class WalletSystem {
@@ -32,8 +33,8 @@ public class WalletSystem {
         }
     }
 
-    public WalletSystem() {
-        mWalletServiceImpl = new WalletServiceImpl(mLock);
+    public WalletSystem(Context context) {
+        mWalletServiceImpl = new WalletServiceImpl(context, mLock);
     }
 
     public WalletServiceImpl getmWalletServiceImpl() {

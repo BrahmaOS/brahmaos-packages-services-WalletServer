@@ -30,6 +30,7 @@ LOCAL_STATIC_JAVA_LIBRARIES := \
     okhttp-3 \
     okhttp-logging \
     okio \
+    guava-18 \
 
 LOCAL_CERTIFICATE := platform
 LOCAL_PRIVILEGED_MODULE := true

@@ -10,7 +10,7 @@ public class WalletService extends Service implements WalletSystem.Component{
 
     private void initializeWalletSystem() {
         if (null == getWalletSystem()) {
-            WalletSystem.setInstance(new WalletSystem());
+            WalletSystem.setInstance(new WalletSystem(this));
         }
     }
 
