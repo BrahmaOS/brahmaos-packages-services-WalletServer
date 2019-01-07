@@ -130,6 +130,7 @@ import okhttp3.logging.HttpLoggingInterceptor;
 
 import static brahmaos.app.WalletManager.CODE_ERROR_PASSWORD;
 import static brahmaos.app.WalletManager.CODE_NO_ERROR;
+import static brahmaos.app.WalletManager.KYBER_NETWORK_ETH_ADDRESS;
 import static brahmaos.app.WalletManager.WALLET_CHAIN_TYPE_BTC;
 import static brahmaos.app.WalletManager.WALLET_CHAIN_TYPE_ETH;
 
@@ -915,6 +916,216 @@ public class WalletServiceImpl {
             }
         }
 
+        /**
+         * @param src the String value of source ERC20 token contract address
+         * @param dest the String value of destination ERC20 token contract address
+         *
+         * @return the expected exchange rate and slippage rate with unit wei. Note that these returned values
+         *         are in 18 decimals regardless of the destination token's decimals.
+         **/
+        @Override
+        public List<String> getExpectedRate(String networkUrl, String src, String dest) {
+            if (null == networkUrl || networkUrl.isEmpty()) {
+                networkUrl = WalletManager.MAINNET_URL;
+            }
+            if (DEBUG) {
+                Log.d(TAG, "getExpectedRate----" + networkUrl);
+            }
+            try {
+                Web3j web3j = Web3jFactory.build(new HttpService(networkUrl));
+                String rateContractAddress = WalletManager.KYBER_MAIN_NETWORK_ADDRESS;
+                if (networkUrl.equals(WalletManager.ROPSTEN_TEST_URL)) {
+                    rateContractAddress = WalletManager.KYBER_ROPSTEN_NETWORK_ADDRESS;
+                }
+                Function function = new Function("getExpectedRate",
+                        Arrays.<Type>asList(new Address(src),
+                                new Address(dest),
+                                new Uint256(BigInteger.ONE)),
+                        Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}, new TypeReference<Uint256>() {}));
+                String encodedFunction = FunctionEncoder.encode(function);
+                EthCall ethCall = web3j.ethCall(
+                        Transaction.createEthCallTransaction(
+                                "0x0000000000000000000000000000000000000000",
+                                rateContractAddress, encodedFunction),
+                        DefaultBlockParameterName.LATEST)
+                        .send();
+
+                String rateValue = ethCall.getValue();
+                Log.d(TAG, "the kyber wrapper contract rate original result : " + rateValue);
+                List<Type> values = FunctionReturnDecoder.decode(rateValue, function.getOutputParameters());
+                List<String> rateResult = new ArrayList<>();
+                for (Type rates : values) {
+                    Uint256 rate = (Uint256) rates;
+                    // get the String value of rate with unit "wei".
+                    rateResult.add(rate.getValue().toString());
+                }
+                return rateResult;
+            } catch (Exception e) {
+                Log.e(TAG, "getExpectedRate--" + e.toString());
+                return null;
+            }
+        }
+
+        @Override
+        public String approveKyberNetwork(String networkUrl, String src, double amount, String walletAddress,
+                                          String password, double gasPrice, long gasLimit) {
+            if (null == networkUrl || networkUrl.isEmpty()) {
+                networkUrl = WalletManager.MAINNET_URL;
+            }
+            if (DEBUG) {
+                Log.d(TAG, "approveKyberNetwork----" + networkUrl);
+            }
+            try {
+                Web3j web3j = Web3jFactory.build(new HttpService(networkUrl));
+                WalletData wallet = getWalletDataByAddress(walletAddress);
+                if (null == wallet || null == wallet.keyPath || wallet.keyStore.isEmpty()) {
+                    Log.d(TAG, "wallet " + walletAddress + " not exist.");
+                    return null;
+                }
+                Credentials credentials = null;
+                try {
+                    ObjectMapper objectMapper = ObjectMapperFactory.getObjectMapper();
+                    WalletFile walletFile = objectMapper.readValue(wallet.keyStore, WalletFile.class);
+                    credentials = Credentials.create(Wallet.decrypt(password, walletFile));
+                } catch (Exception e) {
+                    Log.d(TAG, "approveKyberNetwork--Error: password is wrong!");
+                    return null;
+                }
+
+                String kyberContractAddress = WalletManager.KYBER_MAIN_NETWORK_ADDRESS;
+                if (networkUrl.equals(WalletManager.ROPSTEN_TEST_URL)) {
+                    kyberContractAddress = WalletManager.KYBER_ROPSTEN_NETWORK_ADDRESS;
+                }
+                Function function = new Function(
+                        "approve",
+                        Arrays.<Type>asList(new Address(kyberContractAddress),
+                                new Uint256(BigDecimal.valueOf(amount).multiply(new BigDecimal(Math.pow(10, 18))).toBigInteger())),
+                        Collections.<TypeReference<?>>emptyList());
+                String encodedFunction = FunctionEncoder.encode(function);
+
+                RawTransactionManager txManager = new RawTransactionManager(web3j, credentials);
+                EthSendTransaction transactionResponse = txManager.sendTransaction(
+                        Convert.toWei(BigDecimal.valueOf(gasPrice), Convert.Unit.GWEI).toBigIntegerExact(),
+                        BigInteger.valueOf(gasLimit), src, encodedFunction, BigInteger.ZERO);
+
+                if (transactionResponse.hasError()) {
+                    Log.e(TAG, "approveKyberNetwork--Error processing transaction request: "
+                            + transactionResponse.getError().getMessage());
+                    return null;
+                }
+                return transactionResponse.getTransactionHash();
+            } catch (Exception e) {
+                Log.e(TAG, "approveKyberNetwork--" + e.toString());
+                return null;
+            }
+        }
+
+        @Override
+        public String getContractAllowance(String networkUrl, String walletAddress, String src) {
+            if (null == networkUrl || networkUrl.isEmpty()) {
+                networkUrl = WalletManager.MAINNET_URL;
+            }
+            if (DEBUG) {
+                Log.d(TAG, "getContractAllowance----" + networkUrl);
+            }
+            try {
+                Web3j web3j = Web3jFactory.build(new HttpService(networkUrl));
+                String kyberContractAddress = WalletManager.KYBER_MAIN_NETWORK_ADDRESS;
+                if (networkUrl.equals(WalletManager.ROPSTEN_TEST_URL)) {
+                    kyberContractAddress = WalletManager.KYBER_ROPSTEN_NETWORK_ADDRESS;
+                }
+                Function function = new Function(
+                        "allowance",
+                        Arrays.<Type>asList(new Address(walletAddress),
+                                new Address(kyberContractAddress)),
+                        Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+                String encodedFunction = FunctionEncoder.encode(function);
+
+                EthCall ethCall = web3j.ethCall(
+                        Transaction.createEthCallTransaction(
+                                "0x0000000000000000000000000000000000000000",
+                                src, encodedFunction),
+                        DefaultBlockParameterName.LATEST).send();
+
+                String enableResult = ethCall.getValue();
+
+                List<Type> values = FunctionReturnDecoder.decode(enableResult, function.getOutputParameters());
+                Uint256 allowAmount = (Uint256) values.get(0);
+                return allowAmount == null ? null : allowAmount.getValue().toString();
+            } catch (Exception e) {
+                Log.e(TAG, "getContractAllowance--" + e.toString());
+                return null;
+            }
+        }
+
+        @Override
+        public String exchangeToken(String networkUrl, String src,
+                                    String dest, double amount, String walletAddress,
+                                    String maxReceiveAmount,
+                                    String minConversionRate, String password, double gasPrice,
+                                    long gasLimit) {
+            if (null == networkUrl || networkUrl.isEmpty()) {
+                networkUrl = WalletManager.MAINNET_URL;
+            }
+            if (DEBUG) {
+                Log.d(TAG, "exchangeToken----" + networkUrl);
+            }
+            try {
+                Web3j web3j = Web3jFactory.build(new HttpService(networkUrl));
+                WalletData wallet = getWalletDataByAddress(walletAddress);
+                if (null == wallet || null == wallet.keyPath || wallet.keyStore.isEmpty()) {
+                    Log.d(TAG, "wallet " + walletAddress + " not exist.");
+                    return null;
+                }
+                Credentials credentials = null;
+                try {
+                    ObjectMapper objectMapper = ObjectMapperFactory.getObjectMapper();
+                    WalletFile walletFile = objectMapper.readValue(wallet.keyStore, WalletFile.class);
+                    credentials = Credentials.create(Wallet.decrypt(password, walletFile));
+                } catch (Exception e) {
+                    Log.d(TAG, "exchangeToken--Error: password is wrong!");
+                    return null;
+                }
+
+                String kyberContractAddress = WalletManager.KYBER_MAIN_NETWORK_ADDRESS;
+                if (networkUrl.equals(WalletManager.ROPSTEN_TEST_URL)) {
+                    kyberContractAddress = WalletManager.KYBER_ROPSTEN_NETWORK_ADDRESS;
+                }
+
+                Function function = new Function(
+                        "trade",
+                        Arrays.<Type>asList(new Address(src),
+                                new Uint256(BigDecimal.valueOf(amount).multiply(new BigDecimal(Math.pow(10, 18))).toBigInteger()),
+                                new Address(dest),
+                                new Address(walletAddress),
+                                new Uint256(new BigInteger(maxReceiveAmount)),
+                                new Uint256(new BigInteger(minConversionRate)),
+                                new Address("0x0000000000000000000000000000000000000000")),
+                        Collections.<TypeReference<?>>emptyList());
+                String encodedFunction = FunctionEncoder.encode(function);
+
+                // if send ERC20 Token ,the send values is ZERO
+                BigInteger sendValue = BigDecimal.valueOf(amount).multiply(new BigDecimal(Math.pow(10, 18))).toBigInteger();
+                if (!KYBER_NETWORK_ETH_ADDRESS.equals(src)) {
+                    sendValue = BigInteger.ZERO;
+                }
+                RawTransactionManager txManager = new RawTransactionManager(web3j, credentials);
+                EthSendTransaction transactionResponse = txManager.sendTransaction(
+                        Convert.toWei(BigDecimal.valueOf(gasPrice), Convert.Unit.GWEI).toBigIntegerExact(),
+                        BigInteger.valueOf(gasLimit), kyberContractAddress, encodedFunction, sendValue);
+
+                if (transactionResponse.hasError()) {
+                    Log.e(TAG, "exchangeToken--Error processing transaction request: "
+                            + transactionResponse.getError().getMessage());
+                    return null;
+                }
+                return transactionResponse.getTransactionHash();
+            } catch (Exception e) {
+                Log.e(TAG, "exchangeToken--" + e.toString());
+                return null;
+            }
+        }
+
         @Override
         public String transferEthereum(String networkUrl, String accountAddress, String tokenAddress, String password,
                                    String destinationAddress, double amount,
@@ -1094,8 +1305,9 @@ public class WalletServiceImpl {
                             @Override
                             public void run() {
                                 // The wallet has changed now, it'll get auto saved shortly or when the app shuts down.
-                                mContext.sendBroadcastAsUser(
-                                        new Intent(BrahmaIntent.ACTION_TRANSACTION_BROADCAST_COMPLETE), UserHandle.ALL);
+                                Intent i = new Intent(BrahmaIntent.ACTION_TRANSACTION_BROADCAST_COMPLETE);
+                                i.putExtra(BrahmaIntent.EXTRA_TRANSACTION_HASH, sendResult.tx.getHashAsString());
+                                mContext.sendBroadcastAsUser(i, UserHandle.ALL);
                             }
                         }, executorService);
                         return sendResult.tx.getHashAsString();
@@ -1124,55 +1336,61 @@ public class WalletServiceImpl {
             }
             List<TransactionDetails> txDetailsList = new ArrayList<>();
             for (org.bitcoinj.core.Transaction transaction : txList) {
-                TransactionDetails txDetails = new TransactionDetails();
-                txDetails.hash = transaction.getHashAsString();
-                txDetails.amount =  transaction.getValue(kit.wallet()).value;
-                txDetails.updateTime = transaction.getUpdateTime().getTime();
-                txDetails.depthInBlocks = transaction.getConfidence().getDepthInBlocks();
-                txDetails.confirmBlockHeight = transaction.getConfidence().getAppearedAtChainHeight();
-                txDetails.inputs = new ArrayList<>();
-                txDetails.outputs = new ArrayList<>();
+                try {
+                    TransactionDetails txDetails = new TransactionDetails();
+                    txDetails.hash = transaction.getHashAsString();
+                    txDetails.amount = transaction.getValue(kit.wallet()).value;
+                    txDetails.updateTime = transaction.getUpdateTime().getTime();
+                    txDetails.depthInBlocks = transaction.getConfidence().getDepthInBlocks();
+                    txDetails.confirmBlockHeight = transaction.getConfidence().getAppearedAtChainHeight();
+                    txDetails.fee = transaction.getFee() == null ? 0 : transaction.getFee().value;
+                    txDetails.bytesLength = transaction.unsafeBitcoinSerialize().length;
+                    txDetails.inputs = new ArrayList<>();
+                    txDetails.outputs = new ArrayList<>();
 
-                List<TransactionInput> inputList = transaction.getInputs();
-                if (inputList != null && inputList.size() > 0) {
-                    for (TransactionInput input : inputList) {
-                        try {
-                            //get input address and amount
-                            byte[] bytes = input.getScriptSig().getPubKey();
-                            if (null == bytes) {
-                                continue;
+                    List<TransactionInput> inputList = transaction.getInputs();
+                    if (inputList != null && inputList.size() > 0) {
+                        for (TransactionInput input : inputList) {
+                            try {
+                                //get input address and amount
+                                byte[] bytes = input.getScriptSig().getPubKey();
+                                if (null == bytes) {
+                                    continue;
+                                }
+                                org.bitcoinj.core.Address inputAddr = new org.bitcoinj.core.Address(getNetworkParams(),
+                                        Utils.sha256hash160(bytes));
+                                Coin inputValue = input.getValue();
+                                if (inputAddr != null && inputValue != null) {
+                                    HashMap<String, Long> map = new HashMap<>();
+                                    map.put(inputAddr.toBase58(), inputValue.value);
+                                    txDetails.inputs.add(map);
+                                }
+                            } catch (ScriptException | IllegalStateException | NullPointerException e) {
+                                Log.e(TAG, "getBitcoinTransactionsByTime input error: " + e.toString());
                             }
-                            org.bitcoinj.core.Address inputAddr = new org.bitcoinj.core.Address(getNetworkParams(),
-                                    Utils.sha256hash160(bytes));
-                            Coin inputValue = input.getValue();
-                            if (inputAddr != null && inputValue != null) {
-                                HashMap<String, Long> map = new HashMap<>();
-                                map.put(inputAddr.toBase58(), inputValue.value);
-                                txDetails.inputs.add(map);
-                            }
-                        } catch (ScriptException | IllegalStateException | NullPointerException e) {
-                            Log.e(TAG, "getBitcoinTransactionsByTime input error: " + e.toString());
                         }
                     }
-                }
 
-                List<TransactionOutput> outputList = transaction.getOutputs();
-                if (outputList != null && outputList.size() > 0) {
-                    for (TransactionOutput output : outputList) {
-                        try {
-                            org.bitcoinj.core.Address outputAddr = output.getAddressFromP2PKHScript(getNetworkParams());
-                            Coin outputValue = output.getValue();
-                            if (outputAddr != null && outputValue != null) {
-                                HashMap<String, Long> map = new HashMap<>();
-                                map.put(outputAddr.toBase58(), outputValue.value);
-                                txDetails.outputs.add(map);
+                    List<TransactionOutput> outputList = transaction.getOutputs();
+                    if (outputList != null && outputList.size() > 0) {
+                        for (TransactionOutput output : outputList) {
+                            try {
+                                org.bitcoinj.core.Address outputAddr = output.getAddressFromP2PKHScript(getNetworkParams());
+                                Coin outputValue = output.getValue();
+                                if (outputAddr != null && outputValue != null) {
+                                    HashMap<String, Long> map = new HashMap<>();
+                                    map.put(outputAddr.toBase58(), outputValue.value);
+                                    txDetails.outputs.add(map);
+                                }
+                            } catch (ScriptException | IllegalStateException | NullPointerException e) {
+                                Log.e(TAG, "getBitcoinTransactionsByTime  output error: " + e.toString());
                             }
-                        } catch (ScriptException | IllegalStateException | NullPointerException e) {
-                            Log.e(TAG, "getBitcoinTransactionsByTime  output error: " + e.toString());
                         }
                     }
+                    txDetailsList.add(txDetails);
+                } catch (Exception e) {
+                    Log.e(TAG, "getBitcoinTransactionsByTime error: " + e.toString());
                 }
-                txDetailsList.add(txDetails);
             }
             return txDetailsList;
         }
@@ -1347,7 +1565,7 @@ public class WalletServiceImpl {
         try {
             long timeSeconds = System.currentTimeMillis() / 1000;
             DeterministicSeed seed = new DeterministicSeed(
-                    mnemonics, null, "", timeSeconds);
+                    mnemonics, null, "", 0);
             if (isCreation) {
                 seed.setCreationTimeSeconds(timeSeconds);
                 Log.d(TAG, "setCreationTimeSeconds--" + timeSeconds);
